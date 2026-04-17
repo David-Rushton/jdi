@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"reflect"
 )
 
 type App struct {
@@ -36,18 +35,12 @@ func (a *App) AddCommnad(name, description string, invoke Invoker) error {
 		return fmt.Errorf("A command with the name %s already exists", name)
 	}
 
-	a.commands[name] = &command{
-		name,
-		description,
-		invoke,
-		[]*subcommand{},
-		[]*option{},
-		map[string]reflect.Value{},
+	cmd, err := parseCommand(name, description, invoke)
+	if err != nil {
+		return err
 	}
 
-	if e := a.commands[name].parse(); e != nil {
-		return e
-	}
+	a.commands[cmd.name] = cmd
 
 	return nil
 }

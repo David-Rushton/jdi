@@ -3,24 +3,8 @@ package cli
 import (
 	"fmt"
 	"reflect"
-	"regexp"
 	"strconv"
-)
-
-const (
-	CliTag                     = "cli"
-	CliTagSeparator            = '|'
-	ShortOptionPattern         = `^-[a-zA-Z0-9]$`
-	LongOptionPattern          = `^--[a-zA-Z0-9][a-zA-Z0-9-]+$`
-	SubcommandNamePattern      = `^[\[<][a-zA-Z0-9][a-zA-Z0-9-]*[\]>]$`
-	SubcommandPosistionPattern = `^\d+$`
-)
-
-var (
-	shortOptionRegex         = regexp.MustCompile(ShortOptionPattern)
-	longOptionRegex          = regexp.MustCompile(LongOptionPattern)
-	subcommandNameRegex      = regexp.MustCompile(SubcommandNamePattern)
-	subcommandPosistionRegex = regexp.MustCompile(SubcommandPosistionPattern)
+	"strings"
 )
 
 type Invoker interface {
@@ -28,19 +12,26 @@ type Invoker interface {
 }
 
 type command struct {
-	name        string
-	description string
-	invoke      Invoker
-	subcommands []*subcommand
-	options     []*option
-	parameters  map[string]reflect.Value
+	name                 string
+	description          string
+	invoke               Invoker
+	posistionalArguments map[int]*positionalArgument
+	options              map[string]*option
 }
 
-type subcommand struct {
+type positionalArgument struct {
+	position    int
 	name        string
-	posistion   string
 	description string
 	value       reflect.Value
+}
+
+func (pa *positionalArgument) required() bool {
+	return strings.HasPrefix(pa.name, PositionalArgumentRequiredPrefix)
+}
+
+func (pa *positionalArgument) kind() reflect.Kind {
+	return pa.value.Kind()
 }
 
 type option struct {
@@ -50,13 +41,43 @@ type option struct {
 	value       reflect.Value
 }
 
+func (o *option) names() []string {
+	var result []string
+
+	if o.shortName != "" {
+		result = append(result, o.shortName)
+	}
+
+	if o.longName != "" {
+		result = append(result, o.longName)
+	}
+
+	return result
+}
+
+func (o *option) requiresArgument() bool {
+	return o.kind() != reflect.Bool
+}
+
+func (o *option) kind() reflect.Kind {
+	return o.value.Kind()
+}
+
 // TODO: We should return aggregated errors.
-func (c *command) parse() error {
-	paramsT := reflect.TypeOf(c.invoke)
-	paramsV := reflect.ValueOf(c.invoke)
+func parseCommand(name, description string, invoke Invoker) (*command, error) {
+	cmd := &command{
+		name,
+		description,
+		invoke,
+		map[int]*positionalArgument{},
+		map[string]*option{},
+	}
+
+	paramsT := reflect.TypeOf(cmd.invoke)
+	paramsV := reflect.ValueOf(cmd.invoke)
 
 	if paramsT.Kind() != reflect.Pointer {
-		return fmt.Errorf("command %s does not point to a command object", c.name)
+		return nil, fmt.Errorf("command %s does not point to a command object", cmd.name)
 	}
 
 	for i := 0; i < paramsT.Elem().NumField(); i++ {
@@ -65,142 +86,118 @@ func (c *command) parse() error {
 		tag := fieldT.Tag.Get(CliTag)
 
 		if tag != "" {
-			// Extract values.
-			tagElements := split(tag, CliTagSeparator)
-
-			if len(tagElements) < 2 {
-				return fmt.Errorf("invalid tag format: %s", tag)
-			}
-
-			tagDescription := ""
-			shortOption := ""
-			longOption := ""
-			subcommandName := ""
-			subcommandPosistion := ""
-
-			for _, tagElement := range tagElements {
-
-				if shortOptionRegex.MatchString(tagElement) {
-					if len(shortOption) > 0 {
-						return fmt.Errorf("short option defined twice")
-					}
-					shortOption = tagElement
-					continue
+			switch strings.HasPrefix(tag, OptionalTagPrefix) {
+			case true:
+				option, err := parseOption(tag, fieldV)
+				if err != nil {
+					return nil, err
 				}
 
-				if longOptionRegex.MatchString(tagElement) {
-					if len(longOption) > 0 {
-						return fmt.Errorf("long option defined twice")
-					}
-					longOption = tagElement
-					continue
-				}
-
-				if subcommandNameRegex.MatchString(tagElement) {
-					if len(subcommandName) > 0 {
-						return fmt.Errorf("subcommand defined twice")
-					}
-					subcommandName = tagElement
-					continue
-				}
-
-				if subcommandPosistionRegex.MatchString(tagElement) {
-					if subcommandPosistion != "" {
-						return fmt.Errorf("subcommand position defined twice")
-					}
-					subcommandPosistion = tagElement
-					continue
-				}
-
-				if len(tagDescription) > 0 {
-					return fmt.Errorf("description defined twice")
-				}
-				tagDescription = tagElement
-
-				// Validate.
-				if len(tagDescription) == 0 {
-					return fmt.Errorf("description is required")
-				}
-
-				if shortOption == "" && longOption == "" && subcommandName == "" {
-					return fmt.Errorf("one of option and subcommand must be provided")
-				}
-
-				if shortOption != "" || longOption != "" {
-					// Option.
-					if subcommandName != "" || subcommandPosistion != "" {
-						return fmt.Errorf("cannot combine options and subcommands")
+				for _, name := range option.names() {
+					if name != "" {
+						if _, exists := cmd.options[name]; exists {
+							return nil, fmt.Errorf("duplicate option name: %s", name)
+						}
 					}
 
-					c.options = append(c.options, &option{
-						shortOption,
-						longOption,
-						tagDescription,
-						fieldV})
-
-				} else {
-					// Subcommand.
-					if shortOption != "" || longOption != "" {
-						return fmt.Errorf("cannot combine options and subcommands")
-					}
-
-					c.subcommands = append(c.subcommands, &subcommand{
-						subcommandName,
-						subcommandPosistion,
-						tagDescription,
-						fieldV})
+					cmd.options[name] = option
 				}
-			}
 
-			if !fieldV.CanSet() {
-				return fmt.Errorf("cannot update field %s", fieldT.Name)
+			default:
+				positionalArg, err := parsePosistionalArgument(tag, fieldV)
+				if err != nil {
+					return nil, err
+				}
+
+				if _, exists := cmd.posistionalArguments[positionalArg.position]; exists {
+					return nil, fmt.Errorf("duplicate argument position: %v", positionalArg.position)
+				}
+
+				cmd.posistionalArguments[positionalArg.position] = positionalArg
 			}
 		}
 	}
 
-	// Validate.
-	for _, option := range c.options {
-		if option.shortName != "" {
-			if _, exists := c.parameters[option.shortName]; exists {
-				return fmt.Errorf("option %s defined twice", option.shortName)
-			}
-			c.parameters[option.shortName] = option.value
+	// Validate positional arguments.
+	mustBeOptional := false
+	for i := 0; i < len(cmd.posistionalArguments); i++ {
+		if _, exists := cmd.posistionalArguments[i]; !exists {
+			return nil, fmt.Errorf("positional arguments should be consecutive, missing position %d", cmd.posistionalArguments[i].position)
 		}
 
-		if option.longName != "" {
-			if _, exists := c.parameters[option.longName]; exists {
-				return fmt.Errorf("option %s defined twice", option.longName)
-			}
-			c.parameters[option.longName] = option.value
+		if mustBeOptional && cmd.posistionalArguments[i].required() {
+			return nil, fmt.Errorf("required arguments cannot appear after optional arguments")
 		}
-	}
 
-	posistions := map[int]int{}
-	for _, subcommand := range c.subcommands {
-		if _, exists := c.parameters[subcommand.posistion]; exists {
-			return fmt.Errorf("subcommand posisiton %s defined twice", subcommand.posistion)
-		}
-		c.parameters[subcommand.posistion] = subcommand.value
-
-		posistion, e := strconv.ParseInt(subcommand.posistion, 10, 64)
-		if e != nil {
-			panic(fmt.Sprintf("unexpected failure to parse int %s", subcommand.posistion))
-		}
-		posistions[int(posistion)]++
-	}
-
-	// Validate.
-	for i := 0; i < len(posistions); i++ {
-		switch posistions[i] {
-		case 1:
-			// No-op.
-			// Validation passed.
-		case 0:
-			return fmt.Errorf("missing subcommand posistion %d", i)
-		default:
-			return fmt.Errorf("duplicated subcommand posistion %d", i)
+		if !cmd.posistionalArguments[i].required() {
+			mustBeOptional = true
 		}
 	}
 
-	return nil
+	return cmd, nil
+}
+
+func parseOption(tag string, field reflect.Value) (*option, error) {
+	var tagElements = split(tag, '|')
+	if len(tagElements) == 0 || len(tagElements) > 3 {
+		return nil, fmt.Errorf("invalid option tag format: %s", tag)
+	}
+
+	shortName := ""
+	longName := ""
+	for i := 0; i < len(tagElements)-1; i++ {
+		if shortOptionRegex.MatchString(tagElements[i]) {
+			shortName = tagElements[i]
+			continue
+		}
+
+		if longOptionRegex.MatchString(tagElements[i]) {
+			longName = tagElements[i]
+			continue
+		}
+	}
+
+	if shortName == "" || longName == "" {
+		return nil, fmt.Errorf("option tags must contain at least one of short and long name: %s", tag)
+	}
+
+	description := tagElements[len(tagElements)-1]
+	if description == "" {
+		return nil, fmt.Errorf("option tags must contain a description: %s", tag)
+	}
+
+	return &option{
+		shortName,
+		longName,
+		description,
+		field,
+	}, nil
+}
+
+func parsePosistionalArgument(tag string, field reflect.Value) (*positionalArgument, error) {
+	const positionIndex = 0
+	const nameIndex = 1
+	const descriptionIndex = 2
+
+	var tagElements = split(tag, '|')
+	if len(tagElements) != 3 {
+		return nil, fmt.Errorf("invalid positional argument tag format: %s", tag)
+	}
+
+	if !positionalArgumentPositionRegex.MatchString(tagElements[positionIndex]) {
+		return nil, fmt.Errorf("invalid positional argument in tag: %s", tag)
+	}
+
+	if !positionalArgumentNameRegex.MatchString(tagElements[nameIndex]) {
+		return nil, fmt.Errorf("invalid positional argument name in tag: %s", tag)
+	}
+
+	position, _ := strconv.ParseInt(tagElements[positionIndex], 10, 64)
+
+	return &positionalArgument{
+		int(position),
+		tagElements[nameIndex],
+		tagElements[descriptionIndex],
+		field,
+	}, nil
 }

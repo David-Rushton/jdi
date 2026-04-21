@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/David-Rushton/jdi/internal/cli"
 )
@@ -27,8 +28,8 @@ func main() {
 		panic(e)
 	}
 
-	args := []string{"test", "-n", "some name"}
-	if e := app.Run(args[1:]); e != nil {
-		panic(e)
+	args := os.Args
+	if err := app.Run(args[1:]); err != nil {
+		panic(err)
 	}
 }

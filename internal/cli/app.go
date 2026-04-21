@@ -23,8 +23,13 @@ func (a *App) Run(args []string) error {
 		return fmt.Errorf("Cannot find command %s", args[0])
 	}
 
-	tokens := toTokens(args)
-	match(command, tokens)
+	// TODO: Remove matched command from args.
+	tokens := toTokens(args[1:])
+	err := match(command, tokens)
+	if err != nil {
+		// TODO: Add standard error printing.
+		return err
+	}
 
 	return command.invoke.Invoke()
 }

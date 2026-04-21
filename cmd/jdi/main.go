@@ -13,6 +13,9 @@ type TestCommand struct {
 
 func (t *TestCommand) Invoke() error {
 	fmt.Println("Test command invoked")
+	fmt.Println("--------------------")
+	fmt.Printf("<path>       %s\n", t.Path)
+	fmt.Printf("-n|--name    %s\n", t.Name)
 	return nil
 }
 
@@ -25,7 +28,7 @@ func main() {
 	}
 
 	args := []string{"test", "-n", "some name"}
-	if e := app.Run(args); e != nil {
+	if e := app.Run(args[1:]); e != nil {
 		panic(e)
 	}
 }

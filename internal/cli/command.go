@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"math/bits"
 	"reflect"
 	"strconv"
 	"strings"
@@ -16,14 +17,15 @@ type command struct {
 	description          string
 	invoke               Invoker
 	posistionalArguments map[int]*positionalArgument
-	options              map[string]*option
+	optionalArguments    map[string]*option
+	optionalSwitches     map[string]*option
 }
 
 type positionalArgument struct {
 	position    int
 	name        string
 	description string
-	value       reflect.Value
+	field       *updateableField
 }
 
 func (pa *positionalArgument) required() bool {
@@ -31,14 +33,98 @@ func (pa *positionalArgument) required() bool {
 }
 
 func (pa *positionalArgument) kind() reflect.Kind {
-	return pa.value.Kind()
+	return pa.field.value.Kind()
 }
 
 type option struct {
 	shortName   string
 	longName    string
 	description string
-	value       reflect.Value
+	field       *updateableField
+}
+
+type updateableField struct {
+	value    reflect.Value
+	hasValue bool
+}
+
+func (f *updateableField) set(value string) error {
+	if !f.value.CanSet() {
+		return fmt.Errorf("cannot update field")
+	}
+
+	if f.hasValue {
+		return fmt.Errorf("cannot update field twice")
+	}
+
+	getBitSize := func(kind reflect.Kind) int {
+		switch kind {
+		case reflect.Int, reflect.Uint:
+			return bits.UintSize
+		case reflect.Int8, reflect.Uint8:
+			return 8
+		case reflect.Int16, reflect.Uint16:
+			return 16
+		case reflect.Int32, reflect.Uint32:
+			return 32
+		case reflect.Int64, reflect.Uint64:
+			return 64
+		case reflect.Float32:
+			return 32
+		case reflect.Float64:
+			return 64
+		case reflect.Complex64:
+			return 64
+		case reflect.Complex128:
+			return 128
+		default:
+			panic(fmt.Sprintf("cannot get bit size for type %v", kind))
+		}
+	}
+
+	kind := f.value.Kind()
+	switch kind {
+	case reflect.Bool:
+		f.value.SetBool(true)
+
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		num, err := strconv.ParseInt(value, Base10, getBitSize(kind))
+		if err != nil {
+			return fmt.Errorf("cannot convert %s to an interger, because: %v", value, err)
+		}
+		f.value.SetInt(num)
+
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		num, err := strconv.ParseUint(value, Base10, getBitSize(kind))
+		if err != nil {
+			return fmt.Errorf("cannot convert %s to an interger, because: %v", value, err)
+		}
+		f.value.SetUint(num)
+
+	case reflect.Float32, reflect.Float64:
+		num, err := strconv.ParseFloat(value, getBitSize(kind))
+		if err != nil {
+			return fmt.Errorf("cannot convert %s to a float, because: %v", value, err)
+		}
+		f.value.SetFloat(num)
+
+	case reflect.Complex64, reflect.Complex128:
+		num, err := strconv.ParseComplex(value, getBitSize(kind))
+		if err != nil {
+			return fmt.Errorf("cannot convert %s to a float, because: %v", value, err)
+		}
+		f.value.SetComplex(num)
+
+	case reflect.String:
+		f.value.SetString(value)
+
+	default:
+		return fmt.Errorf("field type not supported: %v", kind)
+	}
+
+	f.hasValue = true
+
+	return nil
 }
 
 func (o *option) names() []string {
@@ -60,7 +146,7 @@ func (o *option) requiresArgument() bool {
 }
 
 func (o *option) kind() reflect.Kind {
-	return o.value.Kind()
+	return o.field.value.Kind()
 }
 
 // TODO: We should return aggregated errors.
@@ -71,6 +157,7 @@ func parseCommand(name, description string, invoke Invoker) (*command, error) {
 		invoke,
 		map[int]*positionalArgument{},
 		map[string]*option{},
+		map[string]*option{},
 	}
 
 	paramsT := reflect.TypeOf(cmd.invoke)
@@ -79,6 +166,8 @@ func parseCommand(name, description string, invoke Invoker) (*command, error) {
 	if paramsT.Kind() != reflect.Pointer {
 		return nil, fmt.Errorf("command %s does not point to a command object", cmd.name)
 	}
+
+	options := map[string]bool{}
 
 	for i := 0; i < paramsT.Elem().NumField(); i++ {
 		fieldT := paramsT.Elem().Field(i)
@@ -95,12 +184,19 @@ func parseCommand(name, description string, invoke Invoker) (*command, error) {
 
 				for _, name := range option.names() {
 					if name != "" {
-						if _, exists := cmd.options[name]; exists {
+						if options[name] {
 							return nil, fmt.Errorf("duplicate option name: %s", name)
 						}
 					}
 
-					cmd.options[name] = option
+					options[name] = true
+
+					switch option.requiresArgument() {
+					case true:
+						cmd.optionalArguments[name] = option
+					default:
+						cmd.optionalSwitches[name] = option
+					}
 				}
 
 			default:
@@ -170,7 +266,7 @@ func parseOption(tag string, field reflect.Value) (*option, error) {
 		shortName,
 		longName,
 		description,
-		field,
+		&updateableField{value: field},
 	}, nil
 }
 
@@ -198,6 +294,6 @@ func parsePosistionalArgument(tag string, field reflect.Value) (*positionalArgum
 		int(position),
 		tagElements[nameIndex],
 		tagElements[descriptionIndex],
-		field,
+		&updateableField{value: field},
 	}, nil
 }

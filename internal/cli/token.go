@@ -2,13 +2,16 @@ package cli
 
 import "fmt"
 
+type argTokens interface {
+	next() bool
+	current() argToken
+	peek() (argToken, bool)
+	resetPosition()
+	getRemaining() []argToken
+}
+
 type argToken interface {
-	first() argToken
-	firstAvailable() argToken
-	next() argToken
-	nextAvailable() argToken
 	consume() error
-	remaining() []argToken
 	getValue() string
 	getType() tokenType
 	isEnd() bool
@@ -17,112 +20,110 @@ type argToken interface {
 type tokenType int
 
 const (
-	tokenTypeMaybeOption tokenType = iota
+	tokenTypeStartOfTokens tokenType = iota
+	tokenTypeMaybeOption
 	tokenTypeMaybeOptionArgument
 	tokenTypeMaybePositionalArguement
 	tokenTypePositionalArguement
 	tokenTypeTerminator
-	tokenTypeEnd
+	tokenTypeEndOfTokens
 )
+
+var (
+	HeadToken = &token{isHead: true}
+	TailToken = &token{isTail: false}
+)
+
+type tokens struct {
+	position int
+	tokens   []*token
+}
 
 type token struct {
 	value                 string
 	consumed              bool
 	isTerminator          bool
 	isPositionalArguement bool
+	isHead                bool
 	isTail                bool
 	maybeOption           bool
-	headToken             *token
 	previousToken         *token
-	nextToken             *token
-	tailToken             *token
 }
 
-func tokeniseArgs(args []string) argToken {
-	var head *token
-	var last *token
+func toTokens(args []string) argTokens {
+	result := &tokens{position: -1}
+	var previousToken *token
 	var hasTerminator bool
 
-	tail := &token{isTail: true}
-
-	for i, arg := range args {
+	for _, arg := range args {
 		isTerminator := false
 		if !hasTerminator && arg == "--" {
 			isTerminator = true
 			hasTerminator = true
 		}
 
-		current := &token{
+		currentToken := &token{
+			value:                 arg,
+			isTerminator:          isTerminator,
 			isPositionalArguement: !isTerminator && hasTerminator,
 			maybeOption:           shortOptionRegex.MatchString(arg) || longOptionRegex.MatchString(arg),
-			tailToken:             tail,
-			value:                 arg,
+			previousToken:         previousToken,
 		}
+		result.tokens = append(result.tokens, currentToken)
 
-		switch i {
-		case 0:
-			head = current
-		default:
-			last.nextToken = current
-			current.previousToken = last
-		}
-
-		current.headToken = head
-
-		last = current
+		previousToken = currentToken
 	}
 
-	if last != nil {
-		last.nextToken = tail
-	}
-	tail.previousToken = last
-
-	if head == nil {
-		tail.headToken = tail
-		head = tail
-	}
-
-	return head
+	return result
 }
 
-func (t *token) first() argToken {
-	return t.headToken
-}
-
-func (t *token) firstAvailable() argToken {
-	current := t.headToken
-
-	for !current.isTail {
-		if !current.consumed {
-			return current
+func (t *tokens) next() bool {
+	for i := t.position + 1; i < len(t.tokens); i++ {
+		if !t.tokens[i].consumed {
+			t.position = i
+			return true
 		}
-
-		current = current.nextToken
 	}
 
-	return current.tailToken
+	return false
 }
 
-func (t *token) next() argToken {
-	if t.isTail {
-		return t
+func (t *tokens) current() argToken {
+	if t.position == -1 {
+		return HeadToken
 	}
 
-	return t.nextToken
+	if t.position >= len(t.tokens) {
+		return TailToken
+	}
+
+	return t.tokens[t.position]
 }
 
-func (t *token) nextAvailable() argToken {
-	current := t.nextToken
-
-	for !current.isTail {
-		if !current.consumed {
-			return current
+func (t *tokens) peek() (argToken, bool) {
+	for i := t.position + 1; i < len(t.tokens); i++ {
+		if !t.tokens[i].consumed {
+			return t.tokens[i], true
 		}
-
-		current = current.nextToken
 	}
 
-	return t.tailToken
+	return TailToken, false
+}
+
+func (t *tokens) resetPosition() {
+	t.position = -1
+}
+
+func (t *tokens) getRemaining() []argToken {
+	result := []argToken{}
+
+	for _, token := range t.tokens {
+		if !token.consumed {
+			result = append(result, token)
+		}
+	}
+
+	return result
 }
 
 func (t *token) consume() error {
@@ -134,22 +135,9 @@ func (t *token) consume() error {
 		return fmt.Errorf("cannot consume a token that has already been consumed")
 	}
 
+	t.consumed = true
+
 	return nil
-}
-
-func (t *token) remaining() []argToken {
-	result := []argToken{}
-
-	candidate := t.headToken
-	for candidate != nil {
-		if !candidate.consumed && !candidate.isTail {
-			result = append(result, candidate)
-		}
-
-		candidate = candidate.nextToken
-	}
-
-	return result
 }
 
 func (t *token) getValue() string {
@@ -157,8 +145,12 @@ func (t *token) getValue() string {
 }
 
 func (t *token) getType() tokenType {
+	if t.isHead {
+		return tokenTypeStartOfTokens
+	}
+
 	if t.isTail {
-		return tokenTypeEnd
+		return tokenTypeEndOfTokens
 	}
 
 	if t.isTerminator {
@@ -169,8 +161,10 @@ func (t *token) getType() tokenType {
 		return tokenTypePositionalArguement
 	}
 
-	if t.previousToken.maybeOption && !t.maybeOption {
-		return tokenTypeMaybeOptionArgument
+	if t.previousToken != nil {
+		if t.previousToken.maybeOption && !t.previousToken.consumed && !t.consumed {
+			return tokenTypeMaybeOptionArgument
+		}
 	}
 
 	if t.maybeOption {

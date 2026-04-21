@@ -23,6 +23,9 @@ func (a *App) Run(args []string) error {
 		return fmt.Errorf("Cannot find command %s", args[0])
 	}
 
+	tokens := toTokens(args)
+	match(command, tokens)
+
 	return command.invoke.Invoke()
 }
 
